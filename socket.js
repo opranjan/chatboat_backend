@@ -17,9 +17,15 @@ function initSocket(server) {
     socket.on("agent_join", async ({ name }) => {
       const agent = await Agent.findOneAndUpdate(
         { name },
-        { socketId: socket.id, online: true, language: "en" },
+        {
+          socketId: socket.id,
+          online: true,
+          language: "en",
+        },
         { upsert: true, new: true }
       );
+
+      console.log("🟢 Agent online:", agent.name);
 
       const sessions = await Session.find({
         agentId: agent._id,
@@ -29,13 +35,21 @@ function initSocket(server) {
       socket.emit("existing_sessions", sessions);
     });
 
-    /* ===================== USER JOIN ===================== */
+    /* ===================== USER JOIN (ALWAYS CONNECT) ===================== */
     socket.on("user_join", async (user) => {
-      const agent = await Agent.findOne({ online: true });
+      // 🔥 Always get or create agent
+      let agent = await Agent.findOne();
+
       if (!agent) {
-        socket.emit("bot_message", { message: "All agents are busy 🙏" });
-        return;
+        agent = await Agent.create({
+          name: "Agent_01",
+          online: true,
+        });
       }
+
+      // 🔥 Force agent online (auto-heal)
+      agent.online = true;
+      await agent.save();
 
       const sessionId = `${user.id}_${Date.now()}`;
 
@@ -49,11 +63,15 @@ function initSocket(server) {
 
       socket.join(sessionId);
 
-      io.to(agent.socketId).emit("new_session", {
-        sessionId,
-        user,
-      });
+      // Notify agent if connected
+      if (agent.socketId) {
+        io.to(agent.socketId).emit("new_session", {
+          sessionId,
+          user,
+        });
+      }
 
+      // 🔥 ALWAYS establish session
       socket.emit("session_started", { sessionId });
     });
 
@@ -73,7 +91,7 @@ function initSocket(server) {
       const session = await Session.findOne({ sessionId: data.sessionId });
       if (!session) return;
 
-      // 🔥 SAVE MESSAGE (MongoDB generates _id)
+      // Save message
       const msg = await Message.create({
         sessionId: data.sessionId,
         sender: data.sender,
@@ -83,12 +101,10 @@ function initSocket(server) {
 
       let translated = data.message;
 
-      // USER → AGENT (English)
       if (data.sender === "user") {
         translated = await translateText(data.message, "en");
       }
 
-      // AGENT → USER (user language)
       if (data.sender === "agent") {
         translated = await translateText(
           data.message,
@@ -97,7 +113,7 @@ function initSocket(server) {
       }
 
       io.to(data.sessionId).emit("receive_message", {
-        messageId: msg._id.toString(), // 🔥 REQUIRED
+        messageId: msg._id.toString(),
         sessionId: data.sessionId,
         sender: data.sender,
         message: data.message,
@@ -106,31 +122,19 @@ function initSocket(server) {
       });
     });
 
-    /* ======================================================
-       TRANSLATE ON DEMAND (FINAL FIX)
-    ====================================================== */
-    socket.on("translate_text", async (data) => {
-      const { messageId, text, lang } = data;
-
-      console.log("🌐 [TRANSLATE_REQUEST]");
-      console.log("   MessageId:", messageId);
-      console.log("   Text:", text);
-      console.log("   Target:", lang);
-
+    /* ===================== TRANSLATE ON DEMAND ===================== */
+    socket.on("translate_text", async ({ messageId, text, lang }) => {
       try {
         const translated = await translateText(text, lang);
 
         socket.emit("translated_text", {
-          messageId,               // 🔥 CRITICAL
+          messageId,
           translated: translated || text,
           lang,
         });
-
       } catch (err) {
-        console.error("❌ [TRANSLATE_ERROR]", err.message);
-
         socket.emit("translated_text", {
-          messageId,               // 🔥 STILL REQUIRED
+          messageId,
           translated: text,
           lang,
         });
@@ -139,10 +143,9 @@ function initSocket(server) {
 
     /* ===================== DISCONNECT ===================== */
     socket.on("disconnect", async () => {
-      await Agent.updateOne(
-        { socketId: socket.id },
-        { online: false }
-      );
+      console.log("⚠️ Socket disconnected:", socket.id);
+      // ❌ Do NOT mark agent offline
+      // Agent auto-reconnects on next agent_join
     });
   });
 }
