@@ -59,15 +59,11 @@ function initSocket(server) {
 
     /* ===================== UPDATE LANGUAGE ===================== */
     socket.on("update_language", async ({ sessionId, language }) => {
-      await Session.updateOne(
-        { sessionId },
-        { language }
-      );
-
+      await Session.updateOne({ sessionId }, { language });
       console.log("🌐 User language updated:", language);
     });
 
-    /* ===================== AGENT JOIN ROOM ===================== */
+    /* ===================== JOIN SESSION ===================== */
     socket.on("join_session", (sessionId) => {
       socket.join(sessionId);
     });
@@ -77,8 +73,8 @@ function initSocket(server) {
       const session = await Session.findOne({ sessionId: data.sessionId });
       if (!session) return;
 
-      // Save ORIGINAL message
-      await Message.create({
+      // 🔥 SAVE MESSAGE (MongoDB generates _id)
+      const msg = await Message.create({
         sessionId: data.sessionId,
         sender: data.sender,
         message: data.message,
@@ -87,12 +83,12 @@ function initSocket(server) {
 
       let translated = data.message;
 
-      // USER → AGENT (translate to English)
+      // USER → AGENT (English)
       if (data.sender === "user") {
         translated = await translateText(data.message, "en");
       }
 
-      // AGENT → USER (translate to user's language)
+      // AGENT → USER (user language)
       if (data.sender === "agent") {
         translated = await translateText(
           data.message,
@@ -101,58 +97,45 @@ function initSocket(server) {
       }
 
       io.to(data.sessionId).emit("receive_message", {
+        messageId: msg._id.toString(), // 🔥 REQUIRED
         sessionId: data.sessionId,
         sender: data.sender,
-        message: data.message,      // original
-        translated,                // translated for receiver
+        message: data.message,
+        translated,
         time: new Date(),
       });
     });
 
-    /* ===================== TRANSLATE ON DEMAND ===================== */
-    // socket.on("translate_text", async ({ text, lang }) => {
-    //   const translated = await translateText(text, lang);
-    //   socket.emit("translated_text", { translated });
-    // });
-
-
     /* ======================================================
-   TRANSLATE TEXT (ON DEMAND) — FINAL FIX
-====================================================== */
-socket.on("translate_text", async (data) => {
-  const { text, lang } = data;
+       TRANSLATE ON DEMAND (FINAL FIX)
+    ====================================================== */
+    socket.on("translate_text", async (data) => {
+      const { messageId, text, lang } = data;
 
-  console.log("🌐 [TRANSLATE_REQUEST]");
-  console.log("   Text:", text);
-  console.log("   Target:", lang);
+      console.log("🌐 [TRANSLATE_REQUEST]");
+      console.log("   MessageId:", messageId);
+      console.log("   Text:", text);
+      console.log("   Target:", lang);
 
-  try {
-    const translated = await translateText(text, lang);
+      try {
+        const translated = await translateText(text, lang);
 
-    const safeTranslated =
-      translated && typeof translated === "string"
-        ? translated
-        : text;
+        socket.emit("translated_text", {
+          messageId,               // 🔥 CRITICAL
+          translated: translated || text,
+          lang,
+        });
 
-    console.log("✅ [TRANSLATE_RESPONSE]", safeTranslated);
+      } catch (err) {
+        console.error("❌ [TRANSLATE_ERROR]", err.message);
 
-    socket.emit("translated_text", {
-      translated: safeTranslated,
-      original: text,
-      lang: lang,
+        socket.emit("translated_text", {
+          messageId,               // 🔥 STILL REQUIRED
+          translated: text,
+          lang,
+        });
+      }
     });
-
-  } catch (err) {
-    console.error("❌ [TRANSLATE_ERROR]", err.message);
-
-    socket.emit("translated_text", {
-      translated: text, // fallback
-      original: text,
-      lang: lang,
-    });
-  }
-});
-
 
     /* ===================== DISCONNECT ===================== */
     socket.on("disconnect", async () => {
